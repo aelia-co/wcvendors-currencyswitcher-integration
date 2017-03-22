@@ -71,18 +71,66 @@ class WC_Aelia_WCVendors_CS_Integration {
 	}
 
 	/**
+   * Converts an amount from one currency to another. Uses the functions provided
+   * by the WooCommerce Currency Switcher, developed by Aelia.
+   *
+   * @param float amount The amount to convert.
+   * @param string to_currency The destination currency.
+   * @param string from_currency The source currency.
+   * @return float The amount converted to the target destination currency.
+   */
+  public static function convert($amount, $to_currency, $from_currency = null) {
+    if(empty($from_currency)) {
+      $from_currency = self::shop_base_currency();
+    }
+
+    return apply_filters('wc_aelia_cs_convert', $amount, $from_currency, $to_currency);
+  }
+
+	/**
+	 * Returns a vendor's currency.
+	 *
+	 * @param int vendor_id
+	 * @param string default The default currency to return if the vendor has none
+	 * associated.
+	 * @return string
+	 */
+	protected static function get_pv_shop_currency($vendor_id, $default = null) {
+		$currency = get_user_meta($vendor_id, self::PV_SHOP_CURRENCY_FIELD, true);
+		if(empty($currency)) {
+			$currency = $default;
+		}
+		return $currency;
+	}
+
+	/**
+	 * Returns the Vendor ID for a product.
+	 *
+	 * @param int product_id
+	 * @return int
+	 */
+	protected static function get_product_vendor_id($product_id) {
+		return \WCV_Vendors::get_vendor_from_product($product_id);
+	}
+
+	/**
+	 * Return the currency to be used to calculate commissions for a product.
+	 *
+	 * @param int product_id
+	 * @return string
+	 */
+	protected static function get_product_commission_currency($product_id) {
+		return self::get_pv_shop_currency(self::get_product_vendor_id($product_id),
+																			self::shop_base_currency());
+	}
+
+	/**
 	 * Get the plugin url.
 	 *
 	 * @return string
 	 */
 	public function plugin_url() {
 		return untrailingslashit(plugins_url('/', __FILE__));
-	}
-
-	protected function load_user_data() {
-		$this->current_user_id = get_current_user_id();
-
-		$this->pv_shop_currency = get_user_meta($this->current_user_id, self::PV_SHOP_CURRENCY_FIELD, true);
 	}
 
   /**
@@ -94,6 +142,11 @@ class WC_Aelia_WCVendors_CS_Integration {
 		add_action('wcvendors_settings_after_paypal', array($this, 'wcvendors_settings_after_paypal'), 10);
 		add_action('wcvendors_shop_settings_saved', array($this, 'save_vendor_currency_data'), 10, 1);
 		add_action('wcvendors_shop_settings_admin_saved', array($this, 'save_vendor_currency_data'), 10, 1);
+
+		add_filter('wcv_commission_rate', array($this, 'wcv_commission_rate'), 10, 5);
+
+		// Admin
+		add_action('admin_init', array($this, 'admin_init'), 10, 1);
 	}
 
 	/**
@@ -104,17 +157,20 @@ class WC_Aelia_WCVendors_CS_Integration {
 		load_plugin_textdomain(self::$text_domain, false, dirname(plugin_basename(__FILE__)) . '/languages/');
 	}
 
+	/**
+	 * Renders the currency selector on vendor's profile page.
+	 */
 	public function wcvendors_settings_after_paypal() {
-		$this->load_user_data();
+		$pv_shop_currency = self::get_pv_shop_currency(get_current_user_id());
 		?>
 		<tr id="pv_shop_currency_container">
 			<th>
 				<h4><?php
-					_e('Currency', self::$text_domain);
+					_e('Currency for commissions', self::$text_domain);
 				?></h4>
 			</th>
 			<td>
-				<?php if(empty($this->pv_shop_currency)): ?>
+				<?php if(empty($pv_shop_currency)): ?>
 					<?php $shop_currency = self::shop_base_currency(); ?>
 					<select id="pv_shop_currency" name="pv_shop_currency"><?php
 						foreach(self::enabled_currencies() as $currency) {
@@ -125,29 +181,94 @@ class WC_Aelia_WCVendors_CS_Integration {
 						}
 					?></select>
 					<p class="description">
-						<?php _e('Select the currency in which you will sell your products.', self::$text_domain); ?><br/>
+						<?php _e('Select the currency in which you will receive your commissions.', self::$text_domain); ?><br/>
 						<strong><?php
 							_e('This selection cannot be changed later.', self::$text_domain); ?>
 						</strong>
 					</p>
 				<?php else: ?>
 					<span><?php
-						echo sprintf('%s (%s)', $this->pv_shop_currency, self::get_currency_name($this->pv_shop_currency));
+						echo sprintf('%s (%s)', $pv_shop_currency, self::get_currency_name($pv_shop_currency));
 					?></span>
-					<strong><?php
-						_e('This currency cannot be changed, because it would invalidate the shop data collected so far.', self::$text_domain); ?>
-					</strong>
+					<p class="description"><?php
+						_e('This currency cannot be changed, because it would invalidate the purchase data collected so far.', self::$text_domain);
+						echo '<br>';
+						_e('If you wish to accept commissions in another currency, please open a second vendor account.', self::$text_domain); ?>
+					</p>
 				<?php endif; ?>
 			</td>
 		</tr>
 		<?php
 	}
 
+	/**
+	 * Saves vendor's currency preferences.
+	 *
+	 * @param int user_id Vendor's user ID.
+	 */
 	public function save_vendor_currency_data($user_id) {
 		$pv_shop_currency = !empty($_POST[self::PV_SHOP_CURRENCY_FIELD]) ? $_POST[self::PV_SHOP_CURRENCY_FIELD] : self::shop_base_currency();
 
 		update_user_meta($user_id, self::PV_SHOP_CURRENCY_FIELD, $_POST[self::PV_SHOP_CURRENCY_FIELD]);
 	}
+
+	/**
+	 * Calculates vendor's commission for a specific product, in vendor's currency.
+	 *
+	 * NOTE
+	 * The commission is recalculated from scratch because WC Vendors applies a
+	 * rounding to it, before passing it to the filter.	 *
+	 *
+	 * @param float commission
+	 * @param int product_id
+	 * @param float product_price
+	 * @param WC_Order order
+	 * @param int qty
+	 * @return float
+	 */
+	public function wcv_commission_rate($commission, $product_id, $product_price, $order, $qty) {
+		$commission_currency = self::get_product_commission_currency($product_id);
+		$commission_rate_percent = WCV_Commission::get_commission_rate($product_id);
+
+		$order_currency = $order->get_order_currency();
+		$product_price = self::convert($product_price, $commission_currency, $order_currency);
+
+		$commission = round($product_price * ($commission_rate_percent / 100), 2);
+
+		return apply_filters('wc_aelia_wcvendors_cs_integration_calculated_commission', $commission, $product_id, $product_price, $order, $qty, $commission_currency);
+	}
+
+	/**
+	 * Performs actions in when an admin page loads.
+	 *
+	 */
+	public function admin_init() {
+		if(empty($_GET['page'])) {
+			return;
+		}
+
+		// On the Vendor Orders page, the currency should be the one from vendor's
+		// profile
+		if($_GET['page'] === 'wcv-vendor-orders') {
+			add_filter('woocommerce_currency', array($this, 'set_active_currency_to_pv_shop_currency'), 10, 1);
+		}
+	}
+
+	/**
+	 * Sets the active currency to the one from current vendor's profile.
+	 *
+	 * @param string currency
+	 * @return string
+	 */
+	public function set_active_currency_to_pv_shop_currency($currency) {
+		$vendor_id = get_current_user_id();
+		if(!empty($vendor_id)) {
+			$currency = self::get_pv_shop_currency($vendor_id, self::shop_base_currency());
+		}
+
+		return $currency;
+	}
 }
+
 
 $GLOBALS['wc-aelia-wcvendors-cs-integration'] = new WC_Aelia_WCVendors_CS_Integration();
