@@ -215,10 +215,6 @@ class WC_Aelia_WCVendors_CS_Integration {
 	/**
 	 * Calculates vendor's commission for a specific product, in vendor's currency.
 	 *
-	 * NOTE
-	 * The commission is recalculated from scratch because WC Vendors applies a
-	 * rounding to it, before passing it to the filter.	 *
-	 *
 	 * @param float commission
 	 * @param int product_id
 	 * @param float product_price
@@ -227,13 +223,7 @@ class WC_Aelia_WCVendors_CS_Integration {
 	 * @return float
 	 */
 	public function wcv_commission_rate($commission, $product_id, $product_price, $order, $qty) {
-		$commission_currency = self::get_product_commission_currency($product_id);
-		$commission_rate_percent = WCV_Commission::get_commission_rate($product_id);
-
-		$order_currency = $order->get_order_currency();
-		$product_price = self::convert($product_price, $commission_currency, $order_currency);
-
-		$commission = round($product_price * ($commission_rate_percent / 100), 2);
+		$commission = round(self::convert($commission, $commission_currency, $order_currency), 2);
 
 		return apply_filters('wc_aelia_wcvendors_cs_integration_calculated_commission', $commission, $product_id, $product_price, $order, $qty, $commission_currency);
 	}
